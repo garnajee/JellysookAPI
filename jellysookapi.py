@@ -3,7 +3,7 @@
 from flask import Flask, request, jsonify
 import requests
 import tempfile
-import io
+import os
 import re
 
 # global variables
@@ -49,7 +49,7 @@ def format_message(title, requestedBy_username, overview, media_link, trailer=Fa
   message += f"  → ajouté par {requestedBy_username}\n"
   
   if overview:
-    message += f"```overview```\n"
+    message += f"```{overview}```\n"
   
   message += f"{media_link}\n"
   
@@ -58,44 +58,28 @@ def format_message(title, requestedBy_username, overview, media_link, trailer=Fa
 
   return message
 
-def get_poster(image_url):
-  # get temporary poster path
-  with tempfile.NamedTemporaryFile() as temp:
-    response = requests.get(image_url)
-    temp.write(response.content)
-  return temp.name
+def download_and_get_poster_by_id(poster_id):
+    poster_url = f"https://image.tmdb.org/t/p/w342/{poster_id}"
+    
+    # Download and save poster to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp:
+        response = requests.get(poster_url)
+        temp.write(response.content)
+        temp_path = temp.name
 
-def is_episode_added(title):
-    # Check if the title matches the format "Episode added • ...  SXYZEXYZ ... - Épisode XYZ..."
-    match = re.search(r'(Episode added • .+?) - Épisode \d+', title)
+    return temp_path
 
-    if match:
-        new_title = match.group(1)
-        return True, new_title
-    else:
-        return False, title
+def get_tmdb_details(media_type, tmdbid, language=LANGUAGE):
+    # get details from tmdb API
+    url = f"{base_url}/{media_type}/{tmdbid}"
+    params = {
+        'api_key': TMDB_API_KEY,
+        'language': language,
+    }
+    response = requests.get(url, params=params, timeout=10)
+    return response.json()
 
-# function to get the synopsis of the video from tmdb API
-def get_synopsis(vidt):
-    # parameters
-    global TMDB_API_KEY
-    global LANGUAGE
-    global LANGUAGE2
-    global base_url
-
-    languages = [LANGUAGE, LANGUAGE2]
-
-    for language in languages:
-        if vidt:
-            url = f"{base_url}/{vidt}?api_key={TMDB_API_KEY}&language={language}"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                return response.json()["overview"]
-
-    return None # synopsis not found
-
-# function to get the shortened youtube trailer link from tmdb API
-def get_trailer_link(vidt):
+def get_trailer_link(media_type, tmdbid):
     # parameters
     global TMDB_API_KEY
     global LANGUAGE
@@ -105,7 +89,7 @@ def get_trailer_link(vidt):
     # regex to search trailer depending on the language
     languages = [(LANGUAGE,r"bande[-\s]?annonce"), (LANGUAGE2,r"trailer")]
     trailer_links = []
-    
+    vidt = f"{media_type}/{tmdbid}"
     # search for the corresponding trailer depending on the language
     for language, pattern in languages:
         if vidt:
@@ -151,70 +135,9 @@ def search_trailer_key(vidt, language, pattern):
 
     return None # trailer key not found
 
-# function to get the poster url from tmdb API
-def get_tmdb_poster_url(vidt):
-    global TMDB_API_KEY
-    global base_url
-    global LANGUAGE
-
-    regex = re.compile(r"^[a-z]+/[0-9]+")
-    if "season" in vidt:
-        vidt = regex.findall(vidt)[0]
-
-    # poster api url
-    tmdb_url = f"{base_url}/{vidt}/images?api_key={TMDB_API_KEY}&language={LANGUAGE[:-3]}"
-
-    try:
-        # request to the TMDB API
-        response = requests.get(tmdb_url, timeout=10)
-        # check if the request was successful
-        response.raise_for_status()
-        # parse the response JSON
-        results = response.json()
-
-        # get the first poster url
-        if 'posters' in results and len(results['posters']) > 0:
-            poster_url = results['posters'][0]['file_path']
-            full_poster_url = f"https://image.tmdb.org/t/p/w342{poster_url}"
-            return full_poster_url
-
-        # try with other language
-        tmdb_url2 = f"{base_url}/{vidt}/images?api_key={TMDB_API_KEY}"
-        response = requests.get(tmdb_url2, timeout=10)
-        response.raise_for_status()
-        results = response.json()
-        if 'posters' in results and len(results['posters']) > 0:
-            poster_url = results['posters'][0]['file_path']
-            full_poster_url = f"https://image.tmdb.org/t/p/w342{poster_url}"
-            return full_poster_url
-        else:
-            return jsonify({'message': 'No poster found'}), 400
-
-    except requests.exceptions.RequestException as req_err:
-        return jsonify({'message': f'get poster: Request error: {str(req_err)}'}), 400
-    except requests.exceptions.HTTPError as http_err:
-        return jsonify({'message': f'get poster: HTTP error: {str(http_err)}'}), 400
-    except KeyError as key_err:
-        return jsonify({'message': f'get poster: Key not found: {str(key_err)}'}), 400
-    except IndexError as index_err:
-        return jsonify({'message': f'get poster: Index out of bounds: {str(index_err)}'}), 400
-    except Exception as e:
-        return jsonify({'message': f'get poster: Another error occurred: {str(e)}'}), 400
-
-# function to shorten links
-def shorten_link(link):
-    # find domain name in the link
-    domain = link.split("//")[1].split("/")[0]
-
-    if domain == "www.themoviedb.org":
-        # replace useless part of the link for TMDb
-        return link.replace("https://www.themoviedb.org/", "https://tmdb.org/")
-    elif domain == "www.imdb.com":
-        # replace useless part of the link for IMDb
-        return link.replace("https://www.imdb.com/", "https://imdb.com/")
-    else:
-        # return the link if domain name not recognize
-        return link
+def is_season_or_series(data):
+    # Check if it's a season or a series
+    return data.get('media_type', '') == "tv" and data.get('season_number', '') != ""
 
 @app.route('/api/jellyseerr', methods=['POST'])
 def receive_data():
@@ -222,42 +145,48 @@ def receive_data():
     return jsonify({'message': 'Data is not json!'}), 400
 
   data = request.json
-  title = data.get('title', '')
-  overview = data.get('overview', '')
   media_type = data.get('media_type', '')
   tmdbid = data.get('tmdbid', '')
   tvdbid = data.get('tvdbid', '')
   requestedBy_username = data.get('requestedBy_username', '')
-  media_status = data.get('media_status', '')
-  image_url = data.get('image_url', '')
 
-  if media_type == "movie":
-    # format tmdb_link
+  if is_season_or_series(data):
+    # It's a season
+    season_number = data.get('season_number', '')
+    serie_name = data.get('serie_name', '')
+    tmdb_details = get_tmdb_details('tv', tmdbid, language=LANGUAGE)
+    title = tmdb_details.get('name', '')
+    poster_id = tmdb_details.get('poster_path', '')
+    poster_path = download_and_get_poster_by_id(poster_id)
+    overview = tmdb_details.get('overview', '')
+    media_link = f"● TVDb: https://thetvdb.com/series/{serie_name}/seasons/official/{season_number}"
+    trailer = get_trailer_link('tv', tmdbid)
+    fmessage = format_message(title, requestedBy_username, overview, media_link, trailer)
+    send_whatsapp(WHATSAPP_NUMBER, fmessage, True, poster_path)
+  elif media_type == "movie":
+    # It's a movie
+    tmdb_details = get_tmdb_details(media_type, tmdbid, language=LANGUAGE)
+    title = tmdb_details.get('title', '')
+    overview = tmdb_details.get('overview', '')
+    poster_id = tmdb_details.get('poster_path', '')
+    poster_path = download_and_get_poster_by_id(poster_id)
+    trailer = get_trailer_link(media_type, tmdbid)
     media_link = f"● TMDb: https://tmdb.org/{media_type}/{tmdbid}"
-    # download and get poster path
-    if image_url:
-      poster_path = get_poster(image_url)
-    else:
-      poster_url = get_tmdb_poster_url(media_type, tmdbid)
-      poster_path = get_poster(poster_url)
-    # get trailer link
-    trailer = get_trailer(media_type, tmdbid)
-    # format message
-    fmessage = format_message(title, overview, media_link, trailer)
-    # send message
-    send_whatsapp(phone, fmessage, True, poster_path)
+    fmessage = format_message(title, requestedBy_username, overview, media_link, trailer)
+    send_whatsapp(WHATSAPP_NUMBER, fmessage, True, poster_path)
   else:
-    # if it's a season
-      pass
-    # if it's an episode
-      # no poster
-      # no trailer
-      # overview only if exists
-      media_link = "● TVDb: https://thetvdb.com/series/{serie_name}/seasons/official/{season_number}"
-      fmessage = format_message(title, requestedBy_username, overview, media_link)
-      send_whatsapp(phone, fmessage, False, None)
+    # It's an episode
+    tmdb_details = get_tmdb_details(media_type, tmdbid, language=LANGUAGE2)
+    title = tmdb_details.get('title', '')
+    overview = tmdb_details.get('overview', '')
+    media_link = f"● TMDb: https://tmdb.org/{media_type}/{tmdbid}"
+    fmessage = format_message(title, requestedBy_username, overview, media_link)
+    send_whatsapp(WHATSAPP_NUMBER, fmessage, False, None)
 
-    return jsonify({'message': 'Data received successfully!'})
+  if poster_path:
+    os.remove(poster_path)
+
+  return jsonify({'message': 'Data received successfully!'})
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=7778)
