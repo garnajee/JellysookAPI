@@ -15,5 +15,5 @@ Here is the code you need to put in Jellyseerr: `settings/notifications/webhook`
 
 # Todo
 
--[x] check if it's a season or an episode -> **Check if it works (probably not)**
+- [x] check if it's a season or an episode -> **Check if it works (probably not)**
 
